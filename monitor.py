@@ -8,6 +8,10 @@ LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
 
 def send_line(message):
+    if not LINE_TOKEN or not LINE_USER_ID:
+        print("LINE settings are missing.")
+        return
+
     url = "https://api.line.me/v2/bot/message/push"
 
     headers = {
@@ -29,17 +33,18 @@ def send_line(message):
         url,
         headers=headers,
         json=data,
-        timeout=30
+        timeout=30,
     )
 
     print("LINE status:", response.status_code)
-    print("LINE response:", response.text)
-
-    response.raise_for_status()
 
 
 def check_stock():
-    print("Hermes page checking...")
+    print("Checking Hermes page...")
+
+    if not PICOTIN_URL:
+        print("PICOTIN_URL is missing.")
+        return "ERROR"
 
     headers = {
         "User-Agent": (
@@ -50,67 +55,60 @@ def check_stock():
         "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
     }
 
-    response = requests.get(
-        PICOTIN_URL,
-        headers=headers,
-        timeout=30
-    )
+    try:
+        response = requests.get(
+            PICOTIN_URL,
+            headers=headers,
+            timeout=30,
+            allow_redirects=True,
+        )
+    except requests.RequestException as e:
+        print("Connection error:", e)
+        return "ERROR"
 
-    print("Hermes status:", response.status_code)
+    print("HTTP status:", response.status_code)
     print("Final URL:", response.url)
 
-    response.raise_for_status()
+    # エルメス側に拒否された場合
+    if response.status_code == 403:
+        print("ACCESS BLOCKED: Hermes returned HTTP 403.")
+        print("Stock status cannot be determined.")
+        return "BLOCKED"
+
+    if response.status_code != 200:
+        print("Unexpected HTTP status:", response.status_code)
+        return "ERROR"
 
     soup = BeautifulSoup(response.text, "html.parser")
-    text = soup.get_text(" ", strip=True)
+    text = soup.get_text(" ", strip=True).lower()
 
-    print("Page received successfully.")
-    print("Page text length:", len(text))
-
-    # ---------------------------------
-    # 1. 在庫なし判定を最優先
-    # ---------------------------------
-
+    # 在庫なしを先に判定
     sold_out_words = [
         "現在在庫がございません",
         "このアイテムは現在在庫がございません",
         "現在オンラインでは購入いただけません",
         "在庫なし",
         "在庫切れ",
-        "SOLD OUT",
+        "sold out",
     ]
 
     for word in sold_out_words:
-        if word.lower() in text.lower():
-            print("SOLD OUT detected:", word)
-            return False
+        if word.lower() in text:
+            print("NO STOCK:", word)
+            return "NO_STOCK"
 
-    # ---------------------------------
-    # 2. ピコタンの商品ページか確認
-    # ---------------------------------
-
+    # ピコタンの商品ページか確認
     product_words = [
-        "ピコタン・ロック",
         "ピコタン ロック",
-        "Picotin Lock",
+        "ピコタン・ロック",
+        "picotin lock",
     ]
 
-    product_found = False
-
-    for word in product_words:
-        if word.lower() in text.lower():
-            print("Product confirmed:", word)
-            product_found = True
-            break
-
-    if not product_found:
+    if not any(word.lower() in text for word in product_words):
         print("Picotin product page could not be confirmed.")
-        return False
+        return "UNKNOWN"
 
-    # ---------------------------------
-    # 3. 購入可能表示を確認
-    # ---------------------------------
-
+    # 購入可能表示
     buy_words = [
         "カートに追加",
         "カートに入れる",
@@ -119,49 +117,42 @@ def check_stock():
     ]
 
     for word in buy_words:
-        if word.lower() in text.lower():
-            print("BUY BUTTON detected:", word)
-            return True
+        if word.lower() in text:
+            print("STOCK FOUND:", word)
+            return "STOCK"
 
-    print("Buy button not detected.")
-    return False
+    print("Product page found, but purchase button not detected.")
+    return "UNKNOWN"
 
 
 def main():
-    print("=== PICOTIN JOHNNY SP START ===")
+    print("=== PICOTIN JOHNNY SP CLOUD START ===")
 
-    if not PICOTIN_URL:
-        raise RuntimeError("PICOTIN_URL is missing")
+    result = check_stock()
 
-    if not LINE_TOKEN:
-        raise RuntimeError(
-            "LINE_CHANNEL_ACCESS_TOKEN is missing"
-        )
+    print("RESULT:", result)
 
-    if not LINE_USER_ID:
-        raise RuntimeError(
-            "LINE_USER_ID is missing"
-        )
-
-    print("Secrets are configured.")
-    print("Checking:", PICOTIN_URL)
-
-    stock = check_stock()
-
-    if stock:
-        print("STOCK FOUND!")
-
+    if result == "STOCK":
         send_line(
             "🚨🚨 ピコジョニSP 🚨🚨\n\n"
-            "ピコタン・ロック18が購入可能になった可能性があります！\n"
-            "今すぐ確認してください👇\n\n"
+            "ピコタン・ロック18が購入可能になった可能性があります！\n\n"
+            "今すぐ確認してください👇\n"
             f"{PICOTIN_URL}"
         )
 
-        print("LINE notification sent.")
+    elif result == "BLOCKED":
+        # 403は在庫なしとは判定しない
+        print("Hermes blocked this cloud request.")
+        print("No stock judgment was made.")
+
+    elif result == "NO_STOCK":
+        print("No stock.")
 
     else:
-        print("NO STOCK - No notification.")
+        print("Stock status could not be determined.")
+
+    # 403でもGitHub Actions自体は正常終了
+    print("=== FINISHED ===")
 
 
 if __name__ == "__main__":
